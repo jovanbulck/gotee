@@ -26,8 +26,8 @@ const (
 	solaris64Bit   = runtime.GOOS == "solaris" && sizeofPtr == 8
 )
 
-func Syscall(trap, a1, a2, a3 uintptr) (r1, r2 uintptr, err Errno)
-func Syscall6(trap, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2 uintptr, err Errno)
+func SSyscall(trap, a1, a2, a3 uintptr) (r1, r2 uintptr, err Errno)
+func SSyscall6(trap, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2 uintptr, err Errno)
 func RawSyscall(trap, a1, a2, a3 uintptr) (r1, r2 uintptr, err Errno)
 func RawSyscall6(trap, a1, a2, a3, a4, a5, a6 uintptr) (r1, r2 uintptr, err Errno)
 
@@ -47,6 +47,35 @@ func (m *mmapper) Mmap(fd int, offset int64, length int, prot int, flags int) (d
 
 	// Map the requested memory.
 	addr, errno := m.mmap(0, uintptr(length), prot, flags, fd, offset)
+	if errno != nil {
+		return nil, errno
+	}
+
+	// Slice memory layout
+	var sl = struct {
+		addr uintptr
+		len  int
+		cap  int
+	}{addr, length, length}
+
+	// Use unsafe to turn sl into a []byte.
+	b := *(*[]byte)(unsafe.Pointer(&sl))
+
+	// Register mapping in m and return it.
+	p := &b[cap(b)-1]
+	m.Lock()
+	defer m.Unlock()
+	m.active[p] = b
+	return b, nil
+}
+
+func (m *mmapper) RMmap(ptr uintptr, length, prot, flags, fd int, offset int64) (data []byte, err error) {
+	if length <= 0 {
+		return nil, EINVAL
+	}
+
+	// Map the requested memory.
+	addr, errno := m.mmap(ptr, uintptr(length), prot, flags, fd, offset)
 	if errno != nil {
 		return nil, errno
 	}

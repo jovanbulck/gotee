@@ -96,6 +96,12 @@ type PackagePublic struct {
 	TestImports  []string `json:",omitempty"` // imports from TestGoFiles
 	XTestGoFiles []string `json:",omitempty"` // _test.go files outside package
 	XTestImports []string `json:",omitempty"` // imports from XTestGoFiles
+
+	// Gosecure dependencies
+	Gosectargets map[string][]string `json:",omitempty"`  // this package calls the following methods.
+	Goseccallees []string            `json:", omitempty"` // the callees within that package.
+	Efile        string              `json:", omitempty"` // the enclave binary
+	Relocencl    bool                `json:", omitempty"` // false if no relocation, true if reloc
 }
 
 // AllFiles returns the names of all the files considered for the package.
@@ -251,6 +257,8 @@ func (p *Package) copyBuild(pp *build.Package) {
 	p.TestImports = pp.TestImports
 	p.XTestGoFiles = pp.XTestGoFiles
 	p.XTestImports = pp.XTestImports
+	// @aghosn copy the gosec callees. TODO(aghosn) maybe find where this is called and then do the propagation
+	p.Gosectargets = pp.Gosectargets
 	if IgnoreImports {
 		p.Imports = nil
 		p.TestImports = nil
@@ -1179,6 +1187,7 @@ func (p *Package) load(stk *ImportStack, bp *build.Package, err error) {
 		addImport("syscall")
 	}
 
+	//TODO(aghosn) maybe add the dependency here instead.
 	// SWIG adds imports of some standard packages.
 	if p.UsesSwig() {
 		addImport("runtime/cgo")

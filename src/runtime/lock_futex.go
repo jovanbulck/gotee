@@ -23,9 +23,10 @@ import (
 //		If any procs are sleeping on addr, wake up at most cnt.
 
 const (
-	mutex_unlocked = 0
-	mutex_locked   = 1
-	mutex_sleeping = 2
+	mutex_unlocked       = 0
+	mutex_locked         = 1
+	mutex_sleeping       = 2
+	mutex_locked_enclave = 3
 
 	active_spin     = 4
 	active_spin_cnt = 30
@@ -45,6 +46,11 @@ func key32(p *uintptr) *uint32 {
 
 func lock(l *mutex) {
 	gp := getg()
+	locked_val := uint32(mutex_locked)
+	chg := false
+	if gp.isencl {
+		locked_val = mutex_locked_enclave
+	}
 
 	if gp.m.locks < 0 {
 		throw("runtime·lock: lock count")
@@ -52,7 +58,7 @@ func lock(l *mutex) {
 	gp.m.locks++
 
 	// Speculative grab for lock.
-	v := atomic.Xchg(key32(&l.key), mutex_locked)
+	v := atomic.Xchg(key32(&l.key), locked_val)
 	if v == mutex_unlocked {
 		return
 	}
@@ -69,10 +75,20 @@ func lock(l *mutex) {
 	// On uniprocessors, no point spinning.
 	// On multiprocessors, spin for ACTIVE_SPIN attempts.
 	spin := 0
-	if ncpu > 1 {
+	if ncpu > 1 || isEnclave {
 		spin = active_spin
 	}
+	nbfailures := 0
+
 	for {
+	LSTART:
+		if chg {
+			gp.markednofutex = false
+			chg = false
+		}
+		if nbfailures > 10000 {
+			throw("Too many spins")
+		}
 		// Try for lock, spinning.
 		for i := 0; i < spin; i++ {
 			for l.key == mutex_unlocked {
@@ -80,7 +96,7 @@ func lock(l *mutex) {
 					return
 				}
 			}
-			procyield(active_spin_cnt)
+			procyield(15)
 		}
 
 		// Try for lock, rescheduling.
@@ -90,13 +106,30 @@ func lock(l *mutex) {
 					return
 				}
 			}
+			//The enclave is not allowed to do a yield or futex
+			if isEnclave {
+				goto LSTART
+			}
 			osyield()
 		}
 
+		if !isEnclave && v == mutex_locked_enclave && !gp.markednofutex {
+			chg = true
+			gp.markednofutex = true
+		}
 		// Sleep.
+		if gp.markednofutex {
+			nbfailures++
+			goto LSTART
+		}
+
 		v = atomic.Xchg(key32(&l.key), mutex_sleeping)
 		if v == mutex_unlocked {
 			return
+		}
+		if v == mutex_locked_enclave && !isEnclave {
+			nbfailures++
+			goto LSTART
 		}
 		wait = mutex_sleeping
 		futexsleep(key32(&l.key), mutex_sleeping, -1)
@@ -109,7 +142,13 @@ func unlock(l *mutex) {
 		throw("unlock of unlocked lock")
 	}
 	if v == mutex_sleeping {
-		futexwakeup(key32(&l.key), 1)
+		if isEnclave {
+			// TODO aghosn go through syscall interposition channel for now.
+			go sysFutex(key32(&l.key), 1)
+		} else {
+			futexwakeup(key32(&l.key), 1)
+		}
+
 	}
 
 	gp := getg()
@@ -124,10 +163,16 @@ func unlock(l *mutex) {
 
 // One-time notifications.
 func noteclear(n *note) {
+	if isEnclave {
+		n = Cooprt.TranslateNote(n)
+	}
 	n.key = 0
 }
 
 func notewakeup(n *note) {
+	if isEnclave {
+		n = Cooprt.TranslateNote(n)
+	}
 	old := atomic.Xchg(key32(&n.key), 1)
 	if old != 0 {
 		print("notewakeup - double wakeup (", old, ")\n")
@@ -137,6 +182,9 @@ func notewakeup(n *note) {
 }
 
 func notesleep(n *note) {
+	if isEnclave {
+		n = Cooprt.TranslateNote(n)
+	}
 	gp := getg()
 	if gp != gp.m.g0 {
 		throw("notesleep not on g0")
@@ -162,6 +210,9 @@ func notesleep(n *note) {
 //go:nosplit
 //go:nowritebarrier
 func notetsleep_internal(n *note, ns int64) bool {
+	if isEnclave {
+		n = Cooprt.TranslateNote(n)
+	}
 	gp := getg()
 
 	if ns < 0 {
@@ -208,6 +259,9 @@ func notetsleep_internal(n *note, ns int64) bool {
 }
 
 func notetsleep(n *note, ns int64) bool {
+	if isEnclave {
+		n = Cooprt.TranslateNote(n)
+	}
 	gp := getg()
 	if gp != gp.m.g0 && gp.m.preemptoff != "" {
 		throw("notetsleep not on g0")
@@ -219,6 +273,9 @@ func notetsleep(n *note, ns int64) bool {
 // same as runtime·notetsleep, but called on user g (not g0)
 // calls only nosplit functions between entersyscallblock/exitsyscall
 func notetsleepg(n *note, ns int64) bool {
+	if isEnclave {
+		n = Cooprt.TranslateNote(n)
+	}
 	gp := getg()
 	if gp == gp.m.g0 {
 		throw("notetsleepg on g0")

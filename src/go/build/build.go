@@ -425,6 +425,9 @@ type Package struct {
 	XTestGoFiles   []string                    // _test.go files outside package
 	XTestImports   []string                    // import paths from XTestGoFiles
 	XTestImportPos map[string][]token.Position // line information for XTestImports
+
+	// Gosecure information
+	Gosectargets map[string][]string // The gosecure nodes sorted by package
 }
 
 // IsCommand reports whether the package is considered a
@@ -888,6 +891,9 @@ Found:
 		} else {
 			p.GoFiles = append(p.GoFiles, name)
 		}
+
+		// @aghosn add the gosecure callees.
+		p.Gosectargets = pf.GosecCalls
 	}
 	if badGoError != nil {
 		return p, badGoError
@@ -902,6 +908,9 @@ Found:
 	sort.Strings(p.AllTags)
 
 	p.Imports, p.ImportPos = cleanImports(imported)
+	if p.Gosectargets != nil && len(p.Gosectargets) > 0 {
+		p.Imports = append(p.Imports, "gosec")
+	}
 	p.TestImports, p.TestImportPos = cleanImports(testImported)
 	p.XTestImports, p.XTestImportPos = cleanImports(xTestImported)
 

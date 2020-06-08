@@ -16,6 +16,7 @@ import (
 	"errors"
 	"io"
 	"math/big"
+	"teecomm"
 
 	"golang_org/x/crypto/curve25519"
 )
@@ -49,10 +50,28 @@ func (ka rsaKeyAgreement) processClientKeyExchange(config *Config, cert *Certifi
 		return nil, errors.New("tls: certificate private key does not implement crypto.Decrypter")
 	}
 	// Perform constant time RSA PKCS#1 v1.5 decryption
-	preMasterSecret, err := priv.Decrypt(config.rand(), ciphertext, &rsa.PKCS1v15DecryptOptions{SessionKeyLen: 48})
-	if err != nil {
-		return nil, err
+	var preMasterSecret []byte
+	var err error
+	if cert.DecrChan == nil {
+		preMasterSecret, err = priv.Decrypt(config.rand(), ciphertext, &rsa.PKCS1v15DecryptOptions{SessionKeyLen: 48})
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		preMasterSecret = make([]byte, 48)
+		done := make(chan bool)
+		key, ok := cert.PrivateKey.(*rsa.PrivateKey)
+		if !ok {
+			panic("Unable to type cast crypto.PrivateKey to rsa.PrivateKey")
+		}
+		req := teecomm.DecrRequestMsg{
+			key, ciphertext,
+			&rsa.PKCS1v15DecryptOptions{SessionKeyLen: 48},
+			preMasterSecret, done}
+		cert.DecrChan <- req
+		_ = <-done
 	}
+
 	// We don't check the version number in the premaster secret. For one,
 	// by checking it, we would leak information about the validity of the
 	// encrypted pre-master secret. Secondly, it provides only a small

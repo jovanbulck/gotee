@@ -152,6 +152,7 @@ func init() {
 	CmdBuild.Flag.BoolVar(&cfg.BuildI, "i", false, "")
 	CmdBuild.Flag.StringVar(&cfg.BuildO, "o", "", "output file")
 
+	CmdBuild.Flag.BoolVar(&cfg.Relocencl, "relocencl", false, "")
 	CmdInstall.Flag.BoolVar(&cfg.BuildI, "i", false, "")
 
 	AddBuildFlags(CmdBuild)
@@ -321,6 +322,7 @@ func runBuild(cmd *base.Command, args []string) {
 		p.Target = cfg.BuildO
 		p.Stale = true // must build - not up to date
 		p.StaleReason = "build -o flag in use"
+		p.Relocencl = cfg.Relocencl
 		a := b.AutoAction(ModeInstall, depMode, p)
 		b.Do(a)
 		return

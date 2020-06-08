@@ -352,6 +352,7 @@ func recordspan(vh unsafe.Pointer, p unsafe.Pointer) {
 		oldAllspans := h.allspans
 		*(*notInHeapSlice)(unsafe.Pointer(&h.allspans)) = *(*notInHeapSlice)(unsafe.Pointer(&new))
 		if len(oldAllspans) != 0 {
+			//TODO aghosn handle that better.
 			sysFree(unsafe.Pointer(&oldAllspans[0]), uintptr(cap(oldAllspans))*unsafe.Sizeof(oldAllspans[0]), &memstats.other_sys)
 		}
 	}
@@ -491,7 +492,7 @@ func mlookup(v uintptr, base *uintptr, size *uintptr, sp **mspan) int32 {
 	return 1
 }
 
-// Initialize the heap.
+// Initialize the heap. (TODO(aghosn) here I had a problem with the unlocked)
 func (h *mheap) init(spansStart, spansBytes uintptr) {
 	h.treapalloc.init(unsafe.Sizeof(treapNode{}), nil, nil, &memstats.other_sys)
 	h.spanalloc.init(unsafe.Sizeof(mspan{}), recordspan, unsafe.Pointer(h), &memstats.mspan_sys)

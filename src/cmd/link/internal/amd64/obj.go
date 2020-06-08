@@ -37,6 +37,8 @@ import (
 	"fmt"
 )
 
+const ENCLMASK = 0x040000000000
+
 func Init() (*sys.Arch, ld.Arch) {
 	arch := sys.ArchAMD64
 	if objabi.GOARCH == "amd64p32" {
@@ -113,7 +115,13 @@ func archinit(ctxt *ld.Link) {
 
 		ld.HEADR = ld.ELFRESERVE
 		if *ld.FlagTextAddr == -1 {
-			*ld.FlagTextAddr = (1 << 22) + int64(ld.HEADR)
+			if *ld.Relocencl {
+				// @aghosn here we set the address for the enclave.
+				//*ld.FlagTextAddr = 0x100000 + int64(ld.HEADR)
+				*ld.FlagTextAddr = ENCLMASK + int64(ld.HEADR)
+			} else {
+				*ld.FlagTextAddr = (1 << 22) + int64(ld.HEADR)
+			}
 		}
 		if *ld.FlagDataAddr == -1 {
 			*ld.FlagDataAddr = 0

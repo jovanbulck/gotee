@@ -104,6 +104,8 @@ func (gcToolchain) gc(b *Builder, a *Action, archive string, importcfg []byte, a
 			}
 		}
 	}
+	//TODO(aghosn) here we can pass the packages for gosecure if we want.
+	//args := []interface{}{cfg.BuildToolexec, base.Tool("compile"), "-o", ofile, "-trimpath", b.WorkDir, gcflags, gcargs, "-D", p.Internal.LocalPrefix}
 
 	args := []interface{}{cfg.BuildToolexec, base.Tool("compile"), "-o", ofile, "-trimpath", trimDir(a.Objdir), gcflags, gcargs, "-D", p.Internal.LocalPrefix}
 	if importcfg != nil {
@@ -456,7 +458,20 @@ func (gcToolchain) ld(b *Builder, root *Action, out, importcfg, mainpkg string) 
 		dir, out = filepath.Split(out)
 	}
 
-	return b.run(root, dir, root.Package.ImportPath, nil, cfg.BuildToolexec, base.Tool("link"), "-o", out, "-importcfg", importcfg, ldflags, mainpkg)
+	//TODO(aghosn) adding this to handle the linking of the enclave .out file.
+	args := []interface{}{cfg.BuildToolexec, base.Tool("link"), "-o", out, "-importcfg", importcfg}
+	if root.Package.PackagePublic.Efile != "" {
+		args = append(args, "-lkenclave", root.Package.PackagePublic.Efile)
+	}
+	if root.Package.PackagePublic.Relocencl {
+		args = append(args, "-relocencl")
+		args = append(args, "-E", "_encl0_amd64")
+	}
+	args = append(args, ldflags, mainpkg)
+	return b.run(root, dir, root.Package.ImportPath, nil, args...)
+
+	//TODO @aghosn this was in the go 1.10 version
+	//return b.run(root, dir, root.Package.ImportPath, nil, cfg.BuildToolexec, base.Tool("link"), "-o", out, "-importcfg", importcfg, ldflags, mainpkg)
 }
 
 func (gcToolchain) ldShared(b *Builder, root *Action, toplevelactions []*Action, out, importcfg string, allactions []*Action) error {

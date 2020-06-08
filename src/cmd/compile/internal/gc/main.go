@@ -172,6 +172,9 @@ func Main(archInit func(*Arch)) {
 	mappkg = types.NewPkg("go.map", "go.map")
 	mappkg.Prefix = "go.map"
 
+	Gosecpkg = types.NewPkg("gosec", "gosec")
+	Gosecpkg.Prefix = "gosec"
+
 	Nacl = objabi.GOOS == "nacl"
 
 	flag.BoolVar(&compiling_runtime, "+", false, "compiling runtime")
@@ -539,6 +542,10 @@ func Main(archInit func(*Arch)) {
 	if nsavederrors+nerrors != 0 {
 		errorexit()
 	}
+
+	//TODO aghosn
+	//aghosnInspect(xtop)
+	//GosecurePhase(xtop)
 
 	// Phase 5: Inlining
 	timings.Start("fe", "inlining")
@@ -1133,10 +1140,16 @@ func pkgnotused(lineno src.XPos, path string, name string) {
 	// packages containing unconventional package declarations.
 	// Note that this uses / always, even on Windows, because Go import
 	// paths always use forward slashes.
+	// @aghosn hack for the moment until I figure out how to force the dependency.
+	if name == "gosec" {
+		return
+	}
+
 	elem := path
 	if i := strings.LastIndex(elem, "/"); i >= 0 {
 		elem = elem[i+1:]
 	}
+
 	if name == "" || elem == name {
 		yyerrorl(lineno, "imported and not used: %q", path)
 	} else {

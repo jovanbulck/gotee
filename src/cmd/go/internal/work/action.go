@@ -336,7 +336,18 @@ func (b *Builder) CompileAction(mode, depMode BuildMode, p *load.Package) *Actio
 		}
 
 		for _, p1 := range p.Internal.Imports {
+			if p.Gosectargets != nil {
+				if callees, ok := p.Gosectargets[p1.Name]; ok {
+					p1.Goseccallees = append(p1.Goseccallees, callees...)
+				}
+			}
 			a.Deps = append(a.Deps, b.CompileAction(depMode, depMode, p1))
+		}
+
+		if p.Name == "main" && len(p.Gosectargets) > 0 {
+			//TODO(aghosn) create my action here to generate the main
+			// and trigger the build for the enclave executable.
+			a.Deps = append(a.Deps, b.CreateEnclaveExec(p))
 		}
 
 		if p.Standard {

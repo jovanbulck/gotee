@@ -270,6 +270,8 @@ type gobuf struct {
 	ret  sys.Uintreg
 	lr   uintptr
 	bp   uintptr // for GOEXPERIMENT=framepointer
+	usp  uintptr // unsafe stack pointer
+	ubp  uintptr //unsafe base pointer
 }
 
 // sudog represents a g in a wait list, such as for sending/receiving
@@ -301,6 +303,9 @@ type sudog struct {
 	// For semaphores, all fields (including the ones above)
 	// are only accessed when holding a semaRoot lock.
 
+	id          int32     //TODO @aghosn id in the pool (-1) if does not apply
+	schednext   sguintptr //TODO @aghosn using this for lists compatible with WB
+	needcpy     bool      // @aghosn, for interdomain deepcopy
 	acquiretime int64
 	releasetime int64
 	ticket      uint32
@@ -397,6 +402,10 @@ type g struct {
 	// and check for debt in the malloc hot path. The assist ratio
 	// determines how this corresponds to scan work debt.
 	gcAssistBytes int64
+
+	isencl        bool
+	markednofutex bool
+	ecallchan     chan EcallReq
 }
 
 type m struct {
@@ -749,6 +758,10 @@ var (
 	forcegc    forcegcstate
 	sched      schedt
 	newprocs   int32
+
+	// For the gosecure part.
+	// This is a dedicated osthread that will launch the enclave.
+	secp *p
 
 	// Information about what cpu features are available.
 	// Set on startup in asm_{386,amd64,amd64p32}.s.

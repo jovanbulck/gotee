@@ -145,6 +145,7 @@ const (
 	// On Darwin/arm64, we cannot reserve more than ~5GB of virtual memory,
 	// but as most devices have less than 4GB of physical memory anyway, we
 	// try to be conservative here, and only ask for a 2GB heap.
+	//TODO aghosn fix that for enclave.
 	_MHeapMap_TotalBits = (_64bit*sys.GoosWindows)*35 + (_64bit*(1-sys.GoosWindows)*(1-sys.GoosDarwin*sys.GoarchArm64))*39 + sys.GoosDarwin*sys.GoarchArm64*31 + (1-_64bit)*(32-(sys.GoarchMips+sys.GoarchMipsle))
 	_MHeapMap_Bits      = _MHeapMap_TotalBits - _PageShift
 
@@ -166,6 +167,16 @@ const (
 	//
 	// This should agree with minZeroPage in the compiler.
 	minLegalPointer uintptr = 4096
+)
+
+//TODO aghosn check this.
+// We redefine our own _MaxMemEncl and the _MHeapMap_BitsEncl and replace them in the code.
+// The original values are not used often so it should be feasible.
+// Can set them in runtime.osinit (first of bootloading sequence)
+var (
+	_MHeapMap_TotalBitsEncl uintptr = 0
+	_MHeapMap_BitsEncl      uintptr = 0
+	_MaxMemEncl             uintptr = 0
 )
 
 // physPageSize is the size in bytes of the OS's physical pages.
@@ -245,11 +256,16 @@ func mallocinit() {
 	var p, pSize uintptr
 	var reserved bool
 
+	var localMaxMem uintptr = _MaxMem
+	if isEnclave {
+		localMaxMem = _MaxMemEncl
+	}
+
 	// The spans array holds one *mspan per _PageSize of arena.
-	var spansSize uintptr = (_MaxMem + 1) / _PageSize * sys.PtrSize
+	var spansSize uintptr = (localMaxMem + 1) / _PageSize * sys.PtrSize
 	spansSize = round(spansSize, _PageSize)
 	// The bitmap holds 2 bits per word of arena.
-	var bitmapSize uintptr = (_MaxMem + 1) / (sys.PtrSize * 8 / 2)
+	var bitmapSize uintptr = (localMaxMem + 1) / (sys.PtrSize * 8 / 2)
 	bitmapSize = round(bitmapSize, _PageSize)
 
 	// Set up the allocation arena, a contiguous area of memory where
@@ -284,7 +300,7 @@ func mallocinit() {
 		// allocation at 0x40 << 32 because when using 4k pages with 3-level
 		// translation buffers, the user address space is limited to 39 bits
 		// On darwin/arm64, the address space is even smaller.
-		arenaSize := round(_MaxMem, _PageSize)
+		arenaSize := round(localMaxMem, _PageSize)
 		pSize = bitmapSize + spansSize + arenaSize + _PageSize
 		for i := 0; i <= 0x7f; i++ {
 			switch {
@@ -292,9 +308,15 @@ func mallocinit() {
 				p = uintptr(i)<<40 | uintptrMask&(0x0013<<28)
 			case GOARCH == "arm64":
 				p = uintptr(i)<<40 | uintptrMask&(0x0040<<32)
+			case isEnclave == true:
+				// The value reserved by sgx
+				p = Cooprt.eHeap
 			default:
 				p = uintptr(i)<<40 | uintptrMask&(0x00c0<<32)
 			}
+			// TODO @aghosn, here we try to allocate at 0xc0... but does not work
+			// so we move on to 0x1c0... which should not fail. We interpose in
+			// SysReserve to get the value that we want and relocate the alloc.
 			p = uintptr(sysReserve(unsafe.Pointer(p), pSize, &reserved))
 			if p != 0 {
 				break
@@ -303,6 +325,9 @@ func mallocinit() {
 	}
 
 	if p == 0 {
+		if isEnclave {
+			throw("mallocinit assumption about address space failed!")
+		}
 		// On a 32-bit machine, we can't typically get away
 		// with a giant virtual address space reservation.
 		// Instead we map the memory information bitmap
@@ -351,6 +376,8 @@ func mallocinit() {
 				// expansion.
 				p = round(procBrk+(1<<20), 1<<20)
 			}
+			//TODO @aghosn this one is not called in default case because we did
+			// not fail above, so p != 0.
 			p = uintptr(sysReserve(unsafe.Pointer(p), pSize, &reserved))
 			if p != 0 {
 				break
@@ -388,6 +415,12 @@ func mallocinit() {
 		throw("misrounded allocation in mallocinit")
 	}
 
+	//if isEnclave {
+	//	print("mheap_.arena_end ", hex(mheap_.arena_end), "\n")
+	//	print("mheap_.arena_used ", hex(mheap_.arena_used), "\n")
+	//	print("mheap_.arena_alloc ", hex(mheap_.arena_alloc), "\n")
+	//	print("mheap_.arena_reserved ", mheap_.arena_reserved, "\n")
+	//}
 	// Initialize the rest of the allocator.
 	mheap_.init(spansStart, spansSize)
 	_g_ := getg()
@@ -405,12 +438,17 @@ func (h *mheap) sysAlloc(n uintptr) unsafe.Pointer {
 	// this allocation.
 	const strandLimit = 16 << 20
 
+	var localMaxMem uintptr = _MaxMem
+	if isEnclave {
+		localMaxMem = _MaxMemEncl
+	}
+
 	if n > h.arena_end-h.arena_alloc {
 		// If we haven't grown the arena to _MaxMem yet, try
 		// to reserve some more address space.
 		p_size := round(n+_PageSize, 256<<20)
 		new_end := h.arena_end + p_size // Careful: can overflow
-		if h.arena_end <= new_end && new_end-h.arena_start-1 <= _MaxMem {
+		if h.arena_end <= new_end && new_end-h.arena_start-1 <= localMaxMem {
 			// TODO: It would be bad if part of the arena
 			// is reserved and part is not.
 			var reserved bool
@@ -429,7 +467,7 @@ func (h *mheap) sysAlloc(n uintptr) unsafe.Pointer {
 				// current arena block.
 				h.arena_end = new_end
 				h.arena_reserved = reserved
-			} else if h.arena_start <= p && p+p_size-h.arena_start-1 <= _MaxMem && h.arena_end-h.arena_alloc < strandLimit {
+			} else if h.arena_start <= p && p+p_size-h.arena_start-1 <= localMaxMem && h.arena_end-h.arena_alloc < strandLimit {
 				// We were able to reserve more memory
 				// within the arena space, but it's
 				// not contiguous with our previous
@@ -493,10 +531,10 @@ reservationFailed:
 		return nil
 	}
 
-	if p < h.arena_start || p+p_size-h.arena_start > _MaxMem {
+	if p < h.arena_start || p+p_size-h.arena_start > localMaxMem {
 		// This shouldn't be possible because _MaxMem is the
 		// whole address space on 32-bit.
-		top := uint64(h.arena_start) + _MaxMem
+		top := uint64(h.arena_start) + uint64(localMaxMem)
 		print("runtime: memory allocated by OS (", hex(p), ") not in usable range [", hex(h.arena_start), ",", hex(top), ")\n")
 		sysFree(unsafe.Pointer(p), p_size, &memstats.heap_sys)
 		return nil
@@ -628,6 +666,14 @@ func mallocgc(size uintptr, typ *_type, needzero bool) unsafe.Pointer {
 	shouldhelpgc := false
 	dataSize := size
 	c := gomcache()
+	if c == nil {
+		gp := getg()
+		println("The g we got ", gp, " with its m ", gp.m, "and mcache ", gp.m.mcache, " gp.m.p", gp.m.p)
+		panic("malloc has no access to mcache")
+	} /*else if isEnclave {
+		gp := getg()
+		println("c ok, g ", gp, " with m ", gp.m, " mcache", gp.m.mcache)
+	}*/
 	var x unsafe.Pointer
 	noscan := typ == nil || typ.kind&kindNoPointers != 0
 	if size <= maxSmallSize {
@@ -994,7 +1040,7 @@ func persistentalloc1(size, align uintptr, sysStat *uint64) *notInHeap {
 			if persistent == &globalAlloc.persistentAlloc {
 				unlock(&globalAlloc.mutex)
 			}
-			throw("runtime: cannot allocate memory")
+			throw("runtime: cannot allocate memory (malloc)")
 		}
 		persistent.off = 0
 	}

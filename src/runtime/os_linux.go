@@ -34,8 +34,15 @@ const (
 // Don't sleep longer than ns; ns < 0 means forever.
 //go:nosplit
 func futexsleep(addr *uint32, val uint32, ns int64) {
+	if isEnclave {
+		futexsleep0(addr, val, ns)
+		return
+	}
 	var ts timespec
-
+	// TODO @aghosn: just a check for the moment. Seems we have a problem here.
+	if _ap := uintptr(unsafe.Pointer(addr)); !isEnclave && _ap >= ENCLMASK && _ap <= ENCLMASK+ENCLSIZE {
+		panic("[DEBUG] trying to futexsleep from untrusted on trusted object.")
+	}
 	// Some Linux kernels have a bug where futex of
 	// FUTEX_WAIT returns an internal error code
 	// as an errno. Libpthread ignores the return value
@@ -65,6 +72,10 @@ func futexsleep(addr *uint32, val uint32, ns int64) {
 // If any procs are sleeping on addr, wake up at most cnt.
 //go:nosplit
 func futexwakeup(addr *uint32, cnt uint32) {
+	if isEnclave {
+		futexwakeup0(addr, cnt)
+		return
+	}
 	ret := futex(unsafe.Pointer(addr), _FUTEX_WAKE, cnt, nil, nil, 0)
 	if ret >= 0 {
 		return
@@ -139,9 +150,36 @@ const (
 //go:noescape
 func clone(flags int32, stk, mp, gp, fn unsafe.Pointer) int32
 
-// May run with m.p==nil, so write barriers are not allowed.
 //go:nowritebarrier
 func newosproc(mp *m, stk unsafe.Pointer) {
+	if !isEnclave {
+		newosproc1(mp, stk)
+		return
+	}
+	if Cooprt == nil {
+		throw("Cooprt is nil.")
+	}
+
+	gp := getg()
+	if gp == nil || gp.m == nil || gp.m.g0 == nil {
+		throw("Something is not inited according to previsions.")
+	}
+	ustk := gp.m.g0.sched.usp
+	ubp := gp.m.g0.sched.ubp
+	aptr := UnsafeAllocator.Malloc(unsafe.Sizeof(OExitRequest{}))
+	args := (*OExitRequest)(unsafe.Pointer(aptr))
+	args.Cid = SpawnRequest
+	args.Sid = gp.m.procid
+	args.Did = mp.procid
+	args.Gp = uintptr(unsafe.Pointer(mp.g0))
+	args.Mp = uintptr(unsafe.Pointer(mp))
+	sgx_ocall(Cooprt.OEntry, aptr, ustk, ubp)
+	UnsafeAllocator.Free(aptr, unsafe.Sizeof(OExitRequest{}))
+}
+
+// May run with m.p==nil, so write barriers are not allowed.
+//go:nowritebarrier
+func newosproc1(mp *m, stk unsafe.Pointer) {
 	/*
 	 * note: strace gets confused if we use CLONE_PTRACE here.
 	 */
@@ -270,6 +308,14 @@ func sysauxv(auxv []uintptr) int {
 }
 
 func osinit() {
+	_MHeapMap_TotalBitsEncl = _64bit * 27 //(previous was 25)
+	_MHeapMap_BitsEncl = _MHeapMap_BitsEncl - _PageShift
+	_MaxMemEncl = 1<<_MHeapMap_TotalBitsEncl - 1
+	if isEnclave {
+		gomaxprocs = 0
+		ncpu = 1
+		return
+	}
 	ncpu = getproccount()
 }
 
@@ -312,6 +358,9 @@ func gettid() uint32
 // Called to initialize a new m (including the bootstrap m).
 // Called on the new thread, cannot allocate memory.
 func minit() {
+	if isEnclave {
+		return
+	}
 	minitSignals()
 
 	// for debuggers, in case cgo created the thread

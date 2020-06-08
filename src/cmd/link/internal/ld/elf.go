@@ -12,6 +12,9 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"io"
+	"io/ioutil"
+	"log"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -1692,6 +1695,18 @@ func (ctxt *Link) doelf() {
 	if ctxt.LinkMode == LinkExternal && *flagBuildid != "" {
 		addgonote(ctxt, ".note.go.buildid", ELF_NOTE_GOBUILDID_TAG, []byte(*flagBuildid))
 	}
+
+	if *Lkenclave != "" {
+		Addstring(shstrtab, ".encl")
+		encl, err := ioutil.ReadFile(*Lkenclave)
+		if err != nil {
+			log.Fatalf(err.Error())
+		}
+		if err = os.Remove(*Lkenclave); err != nil {
+			log.Fatalf(err.Error())
+		}
+		addgonote(ctxt, ".encl", 5, encl)
+	}
 }
 
 // Do not write DT_NULL.  elfdynhash will finish it.
@@ -1804,6 +1819,12 @@ func Asmbelf(ctxt *Link, symo int64) {
 
 		if *flagBuildid != "" {
 			sh := elfshname(".note.go.buildid")
+			sh.type_ = SHT_NOTE
+			sh.flags = SHF_ALLOC
+		}
+
+		if *Lkenclave != "" {
+			sh := elfshname(".encl")
 			sh.type_ = SHT_NOTE
 			sh.flags = SHF_ALLOC
 		}

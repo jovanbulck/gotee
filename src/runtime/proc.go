@@ -79,6 +79,9 @@ var (
 	m0           m
 	g0           g
 	raceprocctx0 uintptr
+
+	//@aghosn for the enclave.
+	mglobal *m = nil
 )
 
 //go:linkname runtime_init runtime.init
@@ -125,10 +128,13 @@ func main() {
 	// Allow newproc to start new Ms.
 	mainStarted = true
 
+	if isEnclave {
+		goto skipsysmon
+	}
 	systemstack(func() {
 		newm(sysmon, nil)
 	})
-
+skipsysmon:
 	// Lock the main goroutine onto this, the main OS thread,
 	// during initialization. Most programs won't care, but a few
 	// do require certain calls to be made by the main thread.
@@ -137,7 +143,7 @@ func main() {
 	// to preserve the lock.
 	lockOSThread()
 
-	if g.m != &m0 {
+	if (!isEnclave && g.m != &m0) || (isEnclave && g.m != mglobal) {
 		throw("runtime.main not on m0")
 	}
 
@@ -182,8 +188,13 @@ func main() {
 		cgocall(_cgo_notify_runtime_init_done, nil)
 	}
 
+	if isEnclave {
+		InitAllcg()
+	}
+
 	fn := main_init // make an indirect call, as the linker doesn't know the address of the main package when laying down the runtime
 	fn()
+
 	close(main_init_done)
 
 	needUnlock = false
@@ -194,6 +205,7 @@ func main() {
 		// has a main, but it is not executed.
 		return
 	}
+
 	fn = main_main // make an indirect call, as the linker doesn't know the address of the main package when laying down the runtime
 	fn()
 	if raceenabled {
@@ -277,6 +289,9 @@ func goschedguarded() {
 func gopark(unlockf func(*g, unsafe.Pointer) bool, lock unsafe.Pointer, reason string, traceEv byte, traceskip int) {
 	mp := acquirem()
 	gp := mp.curg
+	if gp == nil {
+		panic("gp is nil in gopark")
+	}
 	status := readgstatus(gp)
 	if status != _Grunning && status != _Gscanrunning {
 		throw("gopark: bad g status")
@@ -300,6 +315,12 @@ func goparkunlock(lock *mutex, reason string, traceEv byte, traceskip int) {
 func goready(gp *g, traceskip int) {
 	systemstack(func() {
 		ready(gp, traceskip, true)
+	})
+}
+
+func goready1(gp *g, traceskip int) {
+	systemstack(func() {
+		ready(gp, traceskip, false)
 	})
 }
 
@@ -337,12 +358,16 @@ func acquireSudog() *sudog {
 	if s.elem != nil {
 		throw("acquireSudog: found s.elem != nil in cache")
 	}
+	s.id = -1
 	releasem(mp)
 	return s
 }
 
 //go:nosplit
 func releaseSudog(s *sudog) {
+	if s.id != -1 {
+		throw("runtime: sudog from pool released.")
+	}
 	if s.elem != nil {
 		throw("runtime: sudog with non-nil elem")
 	}
@@ -478,24 +503,26 @@ func schedinit() {
 	// raceinit must be the first call to race detector.
 	// In particular, it must be done before mallocinit below calls racemapshadow.
 	_g_ := getg()
+
 	if raceenabled {
 		_g_.racectx, raceprocctx0 = raceinit()
 	}
 
 	sched.maxmcount = 10000
-
 	tracebackinit()
 	moduledataverify()
 	stackinit()
 	mallocinit()
-	mcommoninit(_g_.m)
-	alginit()       // maps must not be used before this call
-	modulesinit()   // provides activeModules
-	typelinksinit() // uses maps, activeModules
-	itabsinit()     // uses activeModules
+	mcommoninit(_g_.m) // TODO(aghosn) apparently the stack is allocated here.
+	alginit()          // maps must not be used before this call
+	modulesinit()      // provides activeModules
+	typelinksinit()    // uses maps, activeModules
+	itabsinit()        // uses activeModules
 
-	msigsave(_g_.m)
-	initSigmask = _g_.m.sigmask
+	if !isEnclave {
+		msigsave(_g_.m)
+		initSigmask = _g_.m.sigmask
+	}
 
 	goargs()
 	goenvs()
@@ -507,6 +534,12 @@ func schedinit() {
 	if n, ok := atoi32(gogetenv("GOMAXPROCS")); ok && n > 0 {
 		procs = n
 	}
+	if isEnclave {
+		UnsafeAllocator.Initialize(Cooprt.StartUnsafe, Cooprt.SizeUnsafe)
+		procs = 2 //TODO modify this for more threads in enclave.
+		sched.lastpoll = ENCL_NPOLLING
+	}
+
 	if procresize(procs) != nil {
 		throw("unknown runnable goroutine during bootstrap")
 	}
@@ -560,7 +593,11 @@ func mcommoninit(mp *m) {
 	checkmcount()
 
 	mp.fastrand[0] = 1597334677 * uint32(mp.id)
-	mp.fastrand[1] = uint32(cputicks())
+	if isEnclave {
+		mp.fastrand[1] = uint32(1)
+	} else {
+		mp.fastrand[1] = uint32(cputicks())
+	}
 	if mp.fastrand[0]|mp.fastrand[1] == 0 {
 		mp.fastrand[1] = 1
 	}
@@ -820,7 +857,7 @@ func casgstatus(gp *g, oldval, newval uint32) {
 			for x := 0; x < 10 && gp.atomicstatus != oldval; x++ {
 				procyield(1)
 			}
-		} else {
+		} else if !isEnclave {
 			osyield()
 			nextYield = nanotime() + yieldDelay/2
 		}
@@ -1190,6 +1227,7 @@ func mstart() {
 	// both Go and C functions with stack growth prologues.
 	_g_.stackguard0 = _g_.stack.lo + _StackGuard
 	_g_.stackguard1 = _g_.stackguard0
+
 	mstart1(0)
 
 	// Exit this thread.
@@ -1219,7 +1257,7 @@ func mstart1(dummy int32) {
 
 	// Install signal handlers; after minit so that minit can
 	// prepare the thread to be able to handle the signals.
-	if _g_.m == &m0 {
+	if (!isEnclave && _g_.m == &m0) || (isEnclave && _g_.m == mglobal) {
 		mstartm0()
 	}
 
@@ -1230,7 +1268,7 @@ func mstart1(dummy int32) {
 	if _g_.m.helpgc != 0 {
 		_g_.m.helpgc = 0
 		stopm()
-	} else if _g_.m != &m0 {
+	} else if (!isEnclave && _g_.m != &m0) || (isEnclave && _g_.m != mglobal) {
 		acquirep(_g_.m.nextp.ptr())
 		_g_.m.nextp = 0
 	}
@@ -1266,7 +1304,7 @@ func mexit(osStack bool) {
 	g := getg()
 	m := g.m
 
-	if m == &m0 {
+	if (!isSimulation && m == &m0) || (isEnclave && m == mglobal) {
 		// This is the main thread. Just wedge it.
 		//
 		// On Linux, exiting the main thread puts the process
@@ -1511,7 +1549,32 @@ func allocm(_p_ *p, fn func()) *m {
 		unlock(&sched.lock)
 	}
 
-	mp := new(m)
+	var mp *m
+	// Acquire the m from the Cooprt
+	if isEnclave {
+		//TODO use a lock
+		id := -1
+		var tcs *SgxTCSInfo
+		for i := range Cooprt.Tcss {
+			if Cooprt.Tcss[i].Used {
+				continue
+			}
+			id = i
+			tcs = &Cooprt.Tcss[i]
+			tcs.Used = true
+			break
+		}
+		//TODO unlock
+		if tcs == nil {
+			throw("Unable to acquire a tcs for the enclave")
+		}
+		//mp = tls - m_tls - 8
+		addrp := tcs.Tls - 0x70 - 8
+		mp = (*m)(unsafe.Pointer(addrp))
+		mp.procid = uint64(id)
+	} else {
+		mp = new(m)
+	}
 	mp.mstartfn = fn
 	mcommoninit(mp)
 
@@ -1947,6 +2010,23 @@ func stopm() {
 
 retry:
 	lock(&sched.lock)
+	if cprtQ != nil {
+		run := mcount() - sched.nmidle - sched.nmidlelocked - sched.nmsys
+		if run == 1 && sched.gcwaiting == 0 {
+			//throw("Should not be here !")
+			//We are the last and hence should not block, and there should be a p.
+			//Code inspired from startm.
+			_p_ := pidleget()
+			unlock(&sched.lock)
+			if _p_ == nil {
+				throw("Spinner for enclave unable to find a p.")
+			}
+			_g_.m.nextp.set(_p_)
+			goto wakeup
+		} else if run == 0 {
+			throw("Apparently this can happen")
+		}
+	}
 	mput(_g_.m)
 	unlock(&sched.lock)
 	notesleep(&_g_.m.park)
@@ -1960,6 +2040,7 @@ retry:
 		_g_.m.p = 0
 		goto retry
 	}
+wakeup:
 	acquirep(_g_.m.nextp.ptr())
 	_g_.m.nextp = 0
 }
@@ -2139,6 +2220,7 @@ func gcstopm() {
 	if sched.gcwaiting == 0 {
 		throw("gcstopm: not waiting for gc")
 	}
+
 	if _g_.m.spinning {
 		_g_.m.spinning = false
 		// OK to just drop nmspinning here,
@@ -2225,6 +2307,10 @@ top:
 		asmcgocall(*cgo_yield, nil)
 	}
 
+	if cprtQ != nil && cprtQ.size > 0 {
+		migrateCrossDomain(false)
+	}
+
 	// local runq
 	if gp, inheritTime := runqget(_p_); gp != nil {
 		return gp, inheritTime
@@ -2247,7 +2333,9 @@ top:
 	// blocked thread (e.g. it has already returned from netpoll, but does
 	// not set lastpoll yet), this thread will do blocking netpoll below
 	// anyway.
-	if netpollinited() && atomic.Load(&netpollWaiters) > 0 && atomic.Load64(&sched.lastpoll) != 0 {
+	if netpollinited() && atomic.Load(&netpollWaiters) > 0 &&
+		((!isEnclave && atomic.Load64(&sched.lastpoll) != 0) ||
+			(isEnclave && atomic.Xchg64(&sched.lastpoll, ENCL_POLLING) == ENCL_NPOLLING)) {
 		if gp := netpoll(false); gp != nil { // non-blocking
 			// netpoll returns list of goroutines linked by schedlink.
 			injectglist(gp.schedlink.ptr())
@@ -2255,7 +2343,13 @@ top:
 			if trace.enabled {
 				traceGoUnpark(gp, 0)
 			}
+			if isEnclave {
+				atomic.Store64(&sched.lastpoll, ENCL_NPOLLING)
+			}
 			return gp, false
+		}
+		if isEnclave {
+			atomic.Store64(&sched.lastpoll, ENCL_NPOLLING)
 		}
 	}
 
@@ -2267,6 +2361,7 @@ top:
 		// Neither of that submits to local run queues, so no point in stealing.
 		goto stop
 	}
+
 	// If number of spinning M's >= number of busy P's, block.
 	// This is necessary to prevent excessive CPU consumption
 	// when GOMAXPROCS>>1 but the program parallelism is low.
@@ -2290,6 +2385,12 @@ top:
 	}
 
 stop:
+
+	if isEnclave {
+		//We only have one thread so fuck that, go back to beginning
+		//TODO @aghosn move that somewhere else down there.
+		goto top
+	}
 
 	// We have nothing to do. If we're in the GC mark phase, can
 	// safely scan and blacken objects, and have work to do, run
@@ -2321,6 +2422,17 @@ stop:
 		unlock(&sched.lock)
 		return gp, false
 	}
+
+	if cprtQ != nil {
+		rcount := mcount() - sched.nmidle - sched.nmidlelocked - sched.nmsys
+		if rcount == 1 && sched.gcwaiting == 0 {
+			//we are the last and hence should not block.
+			//we still have our p.
+			unlock(&sched.lock)
+			goto top
+		}
+	}
+
 	if releasep() != _p_ {
 		throw("findrunnable: wrong p")
 	}
@@ -2412,6 +2524,7 @@ stop:
 			injectglist(gp)
 		}
 	}
+
 	stopm()
 	goto top
 }
@@ -2426,6 +2539,9 @@ func pollWork() bool {
 	}
 	p := getg().m.p.ptr()
 	if !runqempty(p) {
+		return true
+	}
+	if cprtQ != nil && cprtQ.size > 0 {
 		return true
 	}
 	if netpollinited() && atomic.Load(&netpollWaiters) > 0 && sched.lastpoll != 0 {
@@ -2518,9 +2634,17 @@ top:
 			traceGoUnpark(gp, 0)
 		}
 	}
+
 	if gp == nil && gcBlackenEnabled != 0 {
 		gp = gcController.findRunnableGCWorker(_g_.m.p.ptr())
 	}
+
+	if gp == nil && cprtQ != nil {
+		if _g_.m.p.ptr().schedtick%5 == 0 && cprtQ.size > 0 {
+			migrateCrossDomain(false)
+		}
+	}
+
 	if gp == nil {
 		// Check the global runnable queue once in a while to ensure fairness.
 		// Otherwise two goroutines can completely occupy the local runqueue
@@ -2666,6 +2790,7 @@ func goexit0(gp *g) {
 	if isSystemGoroutine(gp) {
 		atomic.Xadd(&sched.ngsys, -1)
 	}
+
 	gp.m = nil
 	locked := gp.lockedm != 0
 	gp.lockedm = 0
@@ -3227,6 +3352,7 @@ func malg(stacksize int32) *g {
 		newg.stackguard0 = newg.stack.lo + _StackGuard
 		newg.stackguard1 = ^uintptr(0)
 	}
+	newg.isencl = isEnclave
 	return newg
 }
 
@@ -3857,7 +3983,7 @@ func procresize(nprocs int32) *p {
 	if old < 0 || nprocs <= 0 {
 		throw("procresize: invalid arg")
 	}
-	if trace.enabled {
+	if trace.enabled && !isEnclave {
 		traceGomaxprocs(nprocs)
 	}
 
@@ -4173,7 +4299,7 @@ func checkdead() {
 		return
 	}
 
-	getg().m.throwing = -1 // do not dump full stacks
+	//getg().m.throwing = -1 // do not dump full stacks
 	throw("all goroutines are asleep - deadlock!")
 }
 
@@ -4786,6 +4912,10 @@ func runqgrab(_p_ *p, batch *[256]guintptr, batchHead uint32, stealRunNextG bool
 				// Try to steal from _p_.runnext.
 				if next := _p_.runnext; next != 0 {
 					if _p_.status == _Prunning {
+						// @aghosn: If it is enclave, we skip and trash, don't care. THUG LIFE
+						if isEnclave {
+							goto enclskip
+						}
 						// Sleep to ensure that _p_ isn't about to run the g
 						// we are about to steal.
 						// The important use case here is when the g running
@@ -4805,6 +4935,7 @@ func runqgrab(_p_ *p, batch *[256]guintptr, batchHead uint32, stealRunNextG bool
 							osyield()
 						}
 					}
+				enclskip:
 					if !_p_.runnext.cas(next, 0) {
 						continue
 					}

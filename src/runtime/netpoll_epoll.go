@@ -8,15 +8,58 @@ package runtime
 
 import "unsafe"
 
-func epollcreate(size int32) int32
-func epollcreate1(flags int32) int32
+const (
+	_sys_epoll_create  = 213
+	_sys_epoll_create1 = 291
+	_sys_epoll_ctl     = 233
+	_sys_epoll_wait    = 281
+	_sys_closeonexec   = 72
+)
+
+func eepollcreate(size int32) int32
+func eepollcreate1(flags int32) int32
+func ccloseonexec(fd int32)
 
 //go:noescape
-func epollctl(epfd, op, fd int32, ev *epollevent) int32
+func eepollctl(epfd, op, fd int32, ev *epollevent) int32
 
 //go:noescape
-func epollwait(epfd int32, ev *epollevent, nev, timeout int32) int32
-func closeonexec(fd int32)
+func eepollwait(epfd int32, ev *epollevent, nev, timeout int32) int32
+
+func epollcreate(size int32) int32 {
+	if !isEnclave {
+		return eepollcreate(size)
+	}
+	return gosecinterpose(_sys_epoll_create, uintptr(size), 0, 0, 0, 0, 0)
+}
+func epollcreate1(flags int32) int32 {
+	if !isEnclave {
+		return eepollcreate1(flags)
+	}
+	return gosecinterpose(_sys_epoll_create1, uintptr(flags), 0, 0, 0, 0, 0)
+}
+
+func epollctl(epfd, op, fd int32, ev *epollevent) int32 {
+	if !isEnclave {
+		return eepollctl(epfd, op, fd, ev)
+	}
+	return gosecinterpose(_sys_epoll_ctl, uintptr(epfd), uintptr(op), uintptr(fd), uintptr(unsafe.Pointer(ev)), 0, 0)
+}
+
+func epollwait(epfd int32, ev *epollevent, nev, timeout int32) int32 {
+	if !isEnclave {
+		return eepollwait(epfd, ev, nev, timeout)
+	}
+	return gosecinterpose(_sys_epoll_wait, uintptr(epfd), uintptr(unsafe.Pointer(ev)), uintptr(nev), uintptr(timeout), 0, 0)
+}
+
+func closeonexec(fd int32) {
+	if !isEnclave {
+		ccloseonexec(fd)
+		return
+	}
+	gosecinterpose(_sys_closeonexec, uintptr(fd), 2, 1, 0, 0, 0)
+}
 
 var (
 	epfd int32 = -1 // epoll descriptor
@@ -99,4 +142,88 @@ retry:
 		goto retry
 	}
 	return gp.ptr()
+}
+
+func gosecinterpose(trap, a1, a2, a3, a4, a5, a6 uintptr) int32 {
+	if Cooprt == nil || !isEnclave {
+		panic("Going through interpose with nil Cooprt or outside of enclave.")
+	}
+	//TODO check the curg not nil before doing these things
+	gp := getg()
+	if gp == nil || gp.m.g0 == nil {
+		panic("oh shit")
+	}
+	var r1 uintptr
+	syscid, csys := Cooprt.AcquireSysPool()
+	switch trap {
+	case _sys_closeonexec:
+		fallthrough
+	case _sys_epoll_create:
+		fallthrough
+	case _sys_epoll_create1:
+		req := OcallReq{S3, trap, a1, a2, a3, 0, 0, 0, syscid}
+		Cooprt.Ocall <- req
+		res := <-csys
+		r1 = res.R1
+	case _sys_epoll_ctl:
+		sev := unsafe.Sizeof(epollevent{})
+		ev := UnsafeAllocator.Malloc(sev)
+		memcpy(ev, a4, sev)
+		req := OcallReq{S6, trap, a1, a2, a3, ev, 0, 0, syscid}
+		Cooprt.Ocall <- req
+		res := <-csys
+		//copy back the results and free.
+		memcpy(a4, ev, sev)
+		UnsafeAllocator.Free(ev, sev)
+		r1 = res.R1
+	case _sys_epoll_wait:
+		// We need to do an exit here, so lets give up the channel.
+		Cooprt.ReleaseSysPool(syscid)
+		sev := unsafe.Sizeof(epollevent{})
+		ev := UnsafeAllocator.Malloc(sev)
+		req := (*OcallReq)(unsafe.Pointer(UnsafeAllocator.Malloc(unsafe.Sizeof(OcallReq{}))))
+		res := (*OcallRes)(unsafe.Pointer(UnsafeAllocator.Malloc(unsafe.Sizeof(OcallRes{}))))
+		memcpy(ev, a2, sev)
+		*req = OcallReq{S6, trap, a1, ev, a3, a4, a5, a6, syscid}
+		sgx_ocall_epoll_pwait(req, res)
+		r1 = res.R1
+		UnsafeAllocator.Free(uintptr(unsafe.Pointer(req)), unsafe.Sizeof(*req))
+		UnsafeAllocator.Free(uintptr(unsafe.Pointer(res)), unsafe.Sizeof(*res))
+		memcpy(a2, ev, sev)
+		UnsafeAllocator.Free(ev, sev)
+		return int32(r1)
+	default:
+		panic("Unsupported gosecinterpose syscall")
+	}
+	Cooprt.ReleaseSysPool(syscid)
+	return int32(r1)
+}
+
+func sgx_ocall_epoll_pwait(req *OcallReq, res *OcallRes) {
+	if !isEnclave || Cooprt == nil {
+		throw("Wrong call to sgx ocall epoll pwait")
+	}
+	gp := getg()
+	if gp == nil || gp.m == nil || gp.m.g0 == nil {
+		throw("Something is not inited in g struct.")
+	}
+	ustk := gp.m.g0.sched.usp
+	ubp := gp.m.g0.sched.ubp
+	aptr := UnsafeAllocator.Malloc(unsafe.Sizeof(OExitRequest{}))
+	args := (*OExitRequest)(unsafe.Pointer(aptr))
+	args.Cid = EPollWaitRequest
+	args.Sid = gp.m.procid
+	args.EWReq = uintptr(unsafe.Pointer(req))
+	args.EWRes = uintptr(unsafe.Pointer(res))
+	sgx_ocall(Cooprt.OEntry, aptr, ustk, ubp)
+	UnsafeAllocator.Free(aptr, unsafe.Sizeof(OExitRequest{}))
+}
+
+//TODO remove, avoid duplicated code.
+func memcpy(dest, source, l uintptr) {
+	for i := uintptr(0); i < l; i++ {
+		d := (*byte)(unsafe.Pointer(dest + i))
+		s := (*byte)(unsafe.Pointer(source + i))
+		*d = *s
+	}
 }

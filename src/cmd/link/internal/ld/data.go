@@ -1783,6 +1783,13 @@ func (ctxt *Link) textbuildid() {
 	ctxt.Textp[0] = s
 }
 
+//TODO(aghosn) added this.
+// addEnclave creates a section with the content of the enclave binary.
+func (ctxt *Link) addenclave() {
+	addsection(ctxt.Arch, &SegEnclave, ".encl", 05)
+}
+
+//TODO(aghosn) here we see how to add the section.
 // assign addresses to text
 func (ctxt *Link) textaddress() {
 	addsection(ctxt.Arch, &Segtext, ".text", 05)
@@ -1992,6 +1999,7 @@ func (ctxt *Link) address() {
 		}
 		if s.Name == ".bss" {
 			bss = s
+			//TODO aghosn the bss is here.
 		}
 		if s.Name == ".noptrbss" {
 			noptrbss = s

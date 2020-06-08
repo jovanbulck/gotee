@@ -38,6 +38,7 @@
 #define SYS_gettid		186
 #define SYS_tkill		200
 #define SYS_futex		202
+#define SYS_sched_setaffinity 203
 #define SYS_sched_getaffinity	204
 #define SYS_epoll_create	213
 #define SYS_exit_group		231
@@ -186,6 +187,19 @@ TEXT runtime·mincore(SB),NOSPLIT,$0-28
 
 // func walltime() (sec int64, nsec int32)
 TEXT runtime·walltime(SB),NOSPLIT,$0-12
+	MOVB 	runtime·isEnclave(SB), R9
+	CMPB 	R9, $0
+	JE 	normal
+
+	//MOVB 	runtime·isSimulation(SB), R9
+	//CMPB 	R9, $1
+	//JE 	normal 
+
+	MOVQ $1, AX
+	MOVQ AX, ret+0(FP)
+	RET
+
+normal:
 	// We don't know how much stack space the VDSO code will need,
 	// so switch to g0.
 	// In particular, a kernel configured with CONFIG_OPTIMIZE_INLINING=n
@@ -236,6 +250,19 @@ fallback:
 	RET
 
 TEXT runtime·nanotime(SB),NOSPLIT,$0-8
+	MOVB 	runtime·isEnclave(SB), R9
+	CMPB 	R9, $0
+	JE 	normal
+
+	MOVB 	runtime·isSimulation(SB), R9
+	CMPB 	R9, $1
+	JE 	normal 
+
+	MOVQ $1, AX
+	MOVQ AX, ret+0(FP)
+	RET
+
+normal:
 	// Switch to g0 stack. See comment above in runtime·walltime.
 
 	MOVQ	SP, BP	// Save old SP; BX unchanged by C code.
@@ -630,8 +657,17 @@ TEXT runtime·sched_getaffinity(SB),NOSPLIT,$0
 	MOVL	AX, ret+24(FP)
 	RET
 
+TEXT runtime·sched_setaffinity(SB),NOSPLIT,$0
+	MOVQ	pid+0(FP), DI
+	MOVQ	len+8(FP), SI
+	MOVQ	buf+16(FP), DX
+	MOVL 	$SYS_sched_setaffinity, AX
+	SYSCALL
+	MOVL 	AX, ret+24(FP)
+	RET
+
 // int32 runtime·epollcreate(int32 size);
-TEXT runtime·epollcreate(SB),NOSPLIT,$0
+TEXT runtime·eepollcreate(SB),NOSPLIT,$0
 	MOVL    size+0(FP), DI
 	MOVL    $SYS_epoll_create, AX
 	SYSCALL
@@ -639,7 +675,7 @@ TEXT runtime·epollcreate(SB),NOSPLIT,$0
 	RET
 
 // int32 runtime·epollcreate1(int32 flags);
-TEXT runtime·epollcreate1(SB),NOSPLIT,$0
+TEXT runtime·eepollcreate1(SB),NOSPLIT,$0
 	MOVL	flags+0(FP), DI
 	MOVL	$SYS_epoll_create1, AX
 	SYSCALL
@@ -647,7 +683,7 @@ TEXT runtime·epollcreate1(SB),NOSPLIT,$0
 	RET
 
 // func epollctl(epfd, op, fd int32, ev *epollEvent) int
-TEXT runtime·epollctl(SB),NOSPLIT,$0
+TEXT runtime·eepollctl(SB),NOSPLIT,$0
 	MOVL	epfd+0(FP), DI
 	MOVL	op+4(FP), SI
 	MOVL	fd+8(FP), DX
@@ -658,7 +694,7 @@ TEXT runtime·epollctl(SB),NOSPLIT,$0
 	RET
 
 // int32 runtime·epollwait(int32 epfd, EpollEvent *ev, int32 nev, int32 timeout);
-TEXT runtime·epollwait(SB),NOSPLIT,$0
+TEXT runtime·eepollwait(SB),NOSPLIT,$0
 	// This uses pwait instead of wait, because Android O blocks wait.
 	MOVL	epfd+0(FP), DI
 	MOVQ	ev+8(FP), SI
@@ -671,7 +707,7 @@ TEXT runtime·epollwait(SB),NOSPLIT,$0
 	RET
 
 // void runtime·closeonexec(int32 fd);
-TEXT runtime·closeonexec(SB),NOSPLIT,$0
+TEXT runtime·ccloseonexec(SB),NOSPLIT,$0
 	MOVL    fd+0(FP), DI  // fd
 	MOVQ    $2, SI  // F_SETFD
 	MOVQ    $1, DX  // FD_CLOEXEC

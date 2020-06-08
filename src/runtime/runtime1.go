@@ -47,8 +47,10 @@ func gotraceback() (level int32, all, crash bool) {
 }
 
 var (
-	argc int32
-	argv **byte
+	argc   int32
+	argv   **byte
+	Cooprt *CooperativeRuntime
+	cprtQ  *slqueue
 )
 
 // nosplit for use in linux startup sysargs
@@ -57,10 +59,27 @@ func argv_index(argv **byte, i int32) *byte {
 	return *(**byte)(add(unsafe.Pointer(argv), uintptr(i)*sys.PtrSize))
 }
 
+var (
+	isEnclave    bool = false
+	isSimulation bool = false
+)
+
 func args(c int32, v **byte) {
-	argc = c
-	argv = v
-	sysargs(c, v)
+	if c == -1 {
+		isEnclave = true
+		ptrArgv := (***byte)(unsafe.Pointer(v))
+		Cooprt = (*CooperativeRuntime)(unsafe.Pointer((*ptrArgv)))
+		argv = Cooprt.argv
+		argc = 1
+		cprtQ = &(Cooprt.readyE)
+		c = argc
+		v = argv
+		sysargs(c, v)
+	} else {
+		argc = c
+		argv = v
+		sysargs(c, v)
+	}
 }
 
 func goargs() {
@@ -90,6 +109,10 @@ func goenvs_unix() {
 
 func environ() []string {
 	return envs
+}
+
+func ENVIRON() []string {
+	return environ()
 }
 
 // TODO: These should be locals in testAtomic64, but we don't 8-byte

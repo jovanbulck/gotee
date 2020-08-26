@@ -2,6 +2,20 @@
 
 // func asm_eenter(tcs, xcpt, rdi, rsi uint64)
 TEXT gosec·asm_eenter(SB),$0-40
+
+    /* XXX Poison MXCSR */
+    //MOVQ $0xFFFF, AX 
+    MOVQ $0x1FC0, AX 
+    PUSHQ AX
+    LDMXCSR (SP)
+    POPQ AX
+ 
+    /* XXX Poison FPUCW */
+    MOVQ $0x1f3f, AX
+    PUSHQ AX
+    FLDCW (SP)
+    POPQ AX
+
     MOVQ $2, AX				//EENTER
     MOVQ tcs+0(FP),BX
     MOVQ xcpt+8(FP), CX

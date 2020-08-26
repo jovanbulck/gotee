@@ -2,6 +2,33 @@
 
 This folder contains a hello-world sample code that executes a print from both the untrusted and trusted domains.
 
+## FPU poisoning PoC
+
+Example output showcasing an example run with and without FPU poisoning in an
+untrusted domain and enclave, respectively. Notice the faulty result for
+`VADDPD` when poisoning the denormals-as-zero MXCSR flag:
+
+```
+jo@breuer:~/Documents/gotee/example/hello-world$ ./main 
+From an untrusted domain:
+Hello World!
+[ENTRY] Control Word: 0x37f
+[ENTRY] MXCSR: 0x1fa0
+
+Add(1,2) is 3
+[EXIT] Control Word: 0x37f
+[EXIT] MXCSR: 0x1fa2
+--
+From a trusted domain:
+Hello World!
+[ENTRY] Control Word: 0x1f7f
+[ENTRY] MXCSR: 0x1fe0
+
+Add(1,2) is 0
+[EXIT] Control Word: 0x1f7f
+[EXIT] MXCSR: 0x1fe0
+```
+
 ## Compiling
 
 Just type `make` in `example/hello-world/`.

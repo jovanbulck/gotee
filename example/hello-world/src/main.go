@@ -15,7 +15,7 @@ func main() {
 	<-done
 
 	// Now a secured routine
-	fmt.Println("From a trusted domain:")
+	fmt.Println("--\nFrom a trusted domain:")
 	gosecure hw.HelloWorld(done)
 	<- done
 }

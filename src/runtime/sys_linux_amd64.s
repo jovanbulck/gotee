@@ -605,6 +605,22 @@ TEXT runtime·clone(SB),NOSPLIT,$0
 	CALL	runtime·stackcheck(SB)
 
 nog:
+        /* === GOTEE SIMULATOR === */
+        PUSHQ AX
+        /* XXX Poison MXCSR */
+        //MOVQ $0xFFFF, AX 
+        MOVQ $0x1FC0, AX 
+        PUSHQ AX
+        LDMXCSR (SP)
+        POPQ AX
+ 
+        /* XXX Poison FPUCW */
+        MOVQ $0x1f3f, AX
+        PUSHQ AX
+        FLDCW (SP)
+        POPQ AX
+        POPQ AX
+
 	// Call fn
 	CALL	R12
 

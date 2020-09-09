@@ -3,6 +3,7 @@
 // func asm_eenter(tcs, xcpt, rdi, rsi uint64)
 TEXT gosec·asm_eenter(SB),$0-40
 
+    /* === GOTEE HARDWARE === */
     /* XXX Poison MXCSR */
     //MOVQ $0xFFFF, AX 
     MOVQ $0x1FC0, AX 
